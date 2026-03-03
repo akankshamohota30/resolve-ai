@@ -126,26 +126,65 @@ export default function Index() {
 
   function updateFraudScore(userMsg: string) {
     const msg = userMsg.toLowerCase();
-    const timeSinceChatStart = Date.now() - context.chatStartTime;
     
-    let scoreChange = 0;
+    // CRITICAL: If user is responding to bot's offered options, score = 0
+    const isSelectingBotOption = /^[123]$|option\s*[12]|instant|wallet|amazon pay|bank|card|original/i.test(msg);
     
-    // Add fraud risk points
-    if (timeSinceChatStart < 300000 && /refund|money back/i.test(msg)) scoreChange += 20; // <5 min + refund request
-    if (context.refundAttempts > 0) scoreChange += 20; // Multiple refund attempts
-    if (/just give|just refund|just process/i.test(msg)) scoreChange += 10; // Demanding language
-    if (msg.split(' ').length < 4 && /refund|money/i.test(msg)) scoreChange += 15; // Very short refund request
-    if (/yes yes|ok ok|whatever|fine fine/i.test(msg)) scoreChange += 15; // Dismissive responses
+    // If we're in refund_options state, user is just picking what bot offered
+    if (context.conversationState === 'refund_options' && isSelectingBotOption) {
+      setContext(prev => ({ ...prev, fraudScore: 0 }));
+      return;
+    }
     
-    // Subtract fraud risk points (genuine signs)
-    if (msg.split(' ').length > 15) scoreChange -= 10; // Detailed description
-    if (/tried|attempted|contacted|called|waited/i.test(msg)) scoreChange -= 10; // Shows effort
-    if (/frustrated|upset|disappointed|annoyed/i.test(msg)) scoreChange -= 10; // Genuine emotion
-    if (/replacement|replace|send again/i.test(msg) && !/(refund|money)/i.test(msg)) scoreChange -= 15; // Prefers replacement
+    // If awaitingChoice, user is selecting from options bot provided
+    if (context.awaitingChoice && isSelectingBotOption) {
+      setContext(prev => ({ ...prev, fraudScore: 0 }));
+      return;
+    }
+    
+    // Check if this is user's first message and it's demanding refund
+    const isFirstMessage = messages.length <= 2; // Opening message + user's first
+    const isRefundDemand = /\brefund\b|money back|give me refund|want refund/i.test(msg);
+    
+    let newScore = context.fraudScore;
+    
+    // HIGH FRAUD SIGNALS
+    
+    // 1. Refund as VERY FIRST message with no context
+    if (isFirstMessage && isRefundDemand && msg.length < 30 && !context.issueExplained) {
+      newScore = 70;
+    }
+    
+    // 2. Asked for refund 3+ times in session
+    else if (context.refundAttempts >= 3) {
+      newScore = 80;
+    }
+    
+    // 3. Only repeats "give me refund" without answering questions
+    else if (/give me refund|just refund|just give/i.test(msg) && context.issueExplained) {
+      newScore = Math.min(75, newScore + 25);
+    }
+    
+    // LOW FRAUD SIGNALS (set to 0)
+    
+    // User described problem before asking for refund
+    else if (context.issueExplained && isRefundDemand) {
+      newScore = 0;
+    }
+    
+    // User engaged in conversation (multiple back-and-forth)
+    else if (messages.length > 6) {
+      newScore = Math.max(0, newScore - 10);
+    }
+    
+    // User provides details (long message)
+    else if (msg.length > 40 && /tried|attempted|contacted|waited|delivery|damaged|wrong|broken/i.test(msg)) {
+      newScore = 0;
+    }
     
     setContext(prev => ({ 
       ...prev, 
-      fraudScore: Math.max(0, Math.min(100, prev.fraudScore + scoreChange))
+      fraudScore: Math.max(0, Math.min(100, newScore))
     }));
   }
 
@@ -630,7 +669,12 @@ export default function Index() {
             </View>
             
             {/* Fraud Score Badge (Demo/Portfolio) */}
-            <View style={styles.fraudBadge}>
+            <View style={[
+              styles.fraudBadge,
+              context.fraudScore <= 30 && styles.fraudBadgeGreen,
+              context.fraudScore > 30 && context.fraudScore <= 60 && styles.fraudBadgeYellow,
+              context.fraudScore > 60 && styles.fraudBadgeRed,
+            ]}>
               <Text style={styles.fraudBadgeText}>🛡️ Risk Score: {context.fraudScore}/100</Text>
             </View>
           </View>
@@ -1036,6 +1080,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 12,
+  },
+  fraudBadgeGreen: {
+    backgroundColor: 'rgba(34, 197, 94, 0.9)',
+  },
+  fraudBadgeYellow: {
+    backgroundColor: 'rgba(234, 179, 8, 0.9)',
+  },
+  fraudBadgeRed: {
+    backgroundColor: 'rgba(239, 68, 68, 0.9)',
   },
   fraudBadgeText: {
     color: '#FFFFFF',
