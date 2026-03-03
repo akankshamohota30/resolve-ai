@@ -9,12 +9,21 @@ import {
   Animated,
   Modal,
   Dimensions,
-  Image,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
+const isWeb = Platform.OS === 'web';
+const isLargeScreen = width >= 1024;
+const isMediumScreen = width >= 768 && width < 1024;
+const isSmallScreen = width < 768;
+
+// Responsive dimensions
+const chatWindowWidth = isWeb ? (isLargeScreen ? 450 : isMediumScreen ? 400 : Math.min(380, width - 32)) : Math.min(380, width - 32);
+const chatWindowHeight = isWeb ? Math.min(600, height - 100) : 520;
+
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
 interface Message {
@@ -743,11 +752,12 @@ const styles = StyleSheet.create({
   },
   navbar: {
     backgroundColor: '#131921',
-    flexDirection: 'row',
+    flexDirection: isWeb && isLargeScreen ? 'row' : 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: isWeb ? (isLargeScreen ? 24 : 16) : 16,
     paddingVertical: 12,
     gap: 16,
+    flexWrap: isWeb ? 'nowrap' : 'wrap',
   },
   logo: {
     fontSize: 24,
@@ -820,10 +830,13 @@ const styles = StyleSheet.create({
     marginTop: -16,
   },
   section: {
-    padding: 16,
+    padding: isWeb ? (isLargeScreen ? 32 : 20) : 16,
+    maxWidth: isWeb ? 1200 : undefined,
+    width: '100%',
+    alignSelf: 'center',
   },
   sectionTitle: {
-    fontSize: 22,
+    fontSize: isWeb ? 26 : 22,
     fontWeight: '700',
     color: '#131921',
     marginBottom: 16,
@@ -832,9 +845,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 12,
+    justifyContent: isWeb && isLargeScreen ? 'flex-start' : 'space-between',
   },
   productCard: {
-    width: (width - 44) / 2,
+    width: isWeb ? (isLargeScreen ? (width - 96) / 4 : (width - 72) / 3) : (width - 44) / 2,
+    minWidth: isWeb ? 200 : undefined,
+    maxWidth: isWeb ? 280 : undefined,
     backgroundColor: '#FFFFFF',
     borderRadius: 8,
     padding: 12,
@@ -952,13 +968,13 @@ const styles = StyleSheet.create({
   chatOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-    alignItems: 'flex-end',
-    padding: 16,
+    justifyContent: isWeb ? 'center' : 'flex-end',
+    alignItems: isWeb ? 'center' : 'flex-end',
+    padding: isWeb ? 0 : 16,
   },
   chatWindow: {
-    width: Math.min(380, width - 32),
-    height: 520,
+    width: chatWindowWidth,
+    height: chatWindowHeight,
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
     overflow: 'hidden',
@@ -967,6 +983,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 16,
     elevation: 16,
+    ...(isWeb && {
+      maxWidth: '90vw',
+      maxHeight: '90vh',
+    }),
   },
   chatHeader: {
     backgroundColor: '#131921',
