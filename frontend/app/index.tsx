@@ -36,6 +36,8 @@ interface ConversationContext {
   refundAttempts: number;
   chatStartTime: number;
   repeatIssue: boolean;
+  activeIntent: string | null;
+  issueExplained: boolean;
 }
 
 const PRODUCTS = [
@@ -77,6 +79,8 @@ export default function Index() {
     refundAttempts: 0,
     chatStartTime: Date.now(),
     repeatIssue: false,
+    activeIntent: null,
+    issueExplained: false,
   });
   const [currentSlide, setCurrentSlide] = useState(0);
   
@@ -147,21 +151,56 @@ export default function Index() {
 
   function getBotResponse(userMsg: string): string {
     const msg = userMsg.toLowerCase();
-    let response = '';
-    let additionalNote = '';
+    const msgLength = userMsg.trim().length;
     
     // Check for repeat issue keywords
     const isRepeatIssue = /again|second time|always|every time|not the first time|this keeps happening|keeps happening/i.test(msg);
     if (isRepeatIssue && !context.repeatIssue) {
       setContext(prev => ({ ...prev, repeatIssue: true }));
-      additionalNote = "I see this has happened before — that's completely unacceptable and I sincerely apologize 😔 You should never have to face this more than once.\n\n";
     }
     
-    // INTENT 1: CHOICE NUMBER DETECTION (if awaiting choice)
-    if (context.awaitingChoice && /^[123]$|^option [123]$|^[123]\s|^choice [123]$/i.test(msg.trim())) {
-      const choice = msg.match(/[123]/)?.[0];
+    // ═══════════════════════════════════════════════════════════
+    // STEP 1: IF ISSUE RESOLVED - ONLY ALLOW GRATITUDE/GOODBYE
+    // ═══════════════════════════════════════════════════════════
+    if (context.issueResolved) {
+      // Check for gratitude
+      const isThankYou = /thank|thanks|thx|ty|great|awesome|perfect|brilliant|wonderful|amazing|helpful|sorted|all good|that's great|ok thanks|got it thanks|you're great|so helpful|happy now|satisfied|resolved/i.test(msg);
+      if (isThankYou) {
+        const closingMessages = [
+          "You're so welcome! 😊 Sorry again for the trouble. Hope everything goes smoothly. Have a great day!",
+          "Happy to help! 🙌 That's exactly what I'm here for. Happy shopping! 😊",
+          "Glad I sorted that for you 😊 Take care and enjoy your purchase!",
+        ];
+        const response = closingMessages[context.closingMessageIndex % 3];
+        setContext(prev => ({ ...prev, closingMessageIndex: prev.closingMessageIndex + 1 }));
+        return response;
+      }
       
-      if (context.choiceContext === 'delivery') {
+      // Check for goodbye
+      if (/bye|goodbye|see you|take care|cya|good night|good day|see ya|logging off|ttyl/i.test(msg)) {
+        return "Take care! 👋 Hope I made your day a little easier. Happy shopping on Amazon! 😊";
+      }
+      
+      // If they ask something else after resolution, acknowledge but keep resolved
+      return "Is there anything else I can help you with today? 😊";
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // STEP 2: IF AWAITING CHOICE - HANDLE CHOICE RESPONSES FIRST
+    // ═══════════════════════════════════════════════════════════
+    if (context.awaitingChoice) {
+      // Check for reschedule keywords FIRST
+      const isReschedule = /reschedule|schedule again|change date|deliver tomorrow|missed delivery|attempt failed|deliver later|different time|another day/i.test(msg);
+      
+      if (isReschedule && context.choiceContext === 'delivery') {
+        setContext(prev => ({ ...prev, issueResolved: true, awaitingChoice: false }));
+        return "No problem 👍 I've rescheduled your delivery for tomorrow between 10AM–2PM. You'll receive a confirmation SMS shortly.";
+      }
+      
+      // Check for choice number
+      const choice = msg.match(/^[123]$|option\s*[123]|choice\s*[123]|^[123]\s/i)?.[0]?.match(/[123]/)?.[0];
+      
+      if (choice && context.choiceContext === 'delivery') {
         if (choice === '1') {
           setContext(prev => ({ ...prev, awaitingChoice: false }));
           return "Your order was last scanned at Mumbai distribution facility at 9:43 AM. Delivery was attempted but the partner couldn't reach you.\n\nOptions:\n— Reschedule for tomorrow\n— Nearest pickup point\n— Want replacement or refund instead?\n\nWhat works best?";
@@ -175,7 +214,7 @@ export default function Index() {
         }
       }
       
-      if (context.choiceContext === 'damaged') {
+      if (choice && context.choiceContext === 'damaged') {
         if (choice === '1') {
           setContext(prev => ({ ...prev, issueResolved: true, awaitingChoice: false, riskFlag: true }));
           const flagNote = "\n\nI've also flagged this to our quality team so this doesn't happen to other customers 🔍";
@@ -188,121 +227,21 @@ export default function Index() {
           return "Understood! I've processed a partial refund of ₹750 (30% of item price) to your Amazon Pay wallet for the inconvenience 🙏 It'll reflect in 2 minutes ✅";
         }
       }
-    }
-    
-    // INTENT 2: CLOSING / GRATEFUL
-    const isThankYou = /thank|thanks|thx|ty|great|awesome|perfect|brilliant|wonderful|amazing|helpful|sorted|all good|that's great|ok thanks|got it thanks|you're great|so helpful|happy now|satisfied|resolved/i.test(msg);
-    if (isThankYou) {
-      if (context.issueResolved) {
-        const closingMessages = [
-          "You're so welcome! 😊 Sorry again for the trouble. Hope everything goes smoothly. Have a great day!",
-          "Happy to help! 🙌 That's exactly what I'm here for. Happy shopping! 😊",
-          "Glad I sorted that for you 😊 Take care and enjoy your purchase!",
-        ];
-        const response = closingMessages[context.closingMessageIndex % 3];
-        setContext(prev => ({ ...prev, closingMessageIndex: prev.closingMessageIndex + 1 }));
-        return response;
-      } else {
-        return "You're welcome! 😊 Just checking — did we fully sort out your issue? I want to make sure you're good to go.";
-      }
-    }
-    
-    // INTENT 3: GOODBYE
-    if (/bye|goodbye|see you|take care|cya|good night|good day|see ya|logging off|ttyl/i.test(msg)) {
-      return "Take care! 👋 Hope I made your day a little easier. Happy shopping on Amazon! 😊";
-    }
-    
-    // INTENT 4: ANGRY / EXTREMELY FRUSTRATED
-    const isAngry = msg === msg.toUpperCase() && msg.length > 5;
-    const hasFrustratedWords = /ridiculous|pathetic|worst|horrible|disgusting|unacceptable|fraud|cheating|useless|terrible|awful|never buying again|consumer forum|escalate|legal action|this is a scam/i.test(msg);
-    
-    if (isAngry || hasFrustratedWords) {
-      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', lastIssueType: 'delivery' }));
-      return "That's completely unacceptable and I am so sorry this happened to you 😔 You did not deserve this. I'm treating this as urgent and will fix it right now.\n\nWhat would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
-    }
-    
-    // INTENT 5: DAMAGED / WRONG ITEM DELIVERED
-    const isDamagedOrWrong = /damaged|broken|wrong item|wrong product|cracked|scratched|torn|defective|faulty|not working|wrong\/damaged|wrong parcel|damaged parcel|received wrong|got wrong|different product|not what i ordered|fake|duplicate|open box|tampered|seal broken|used product/i.test(msg);
-    
-    if (isDamagedOrWrong) {
-      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'damaged', lastIssueType: 'damaged', riskFlag: true }));
-      const prefix = additionalNote;
-      return prefix + "Oh no, that's really upsetting 😔 I'm sorry you received a damaged or wrong item — that should never happen.\n\nWhat would you like me to do?\n\n1️⃣ Return & replacement — send it back, get a new one\n2️⃣ Return & refund — send it back, get your money back\n3️⃣ Keep it & partial refund — if the damage is minor";
-    }
-    
-    // INTENT 6: MISSING / UNDELIVERED PACKAGE
-    const isMissingPackage = /didn't receive|did not receive|not received|never got|shows delivered|marked delivered|app shows delivered|parcel not here|package missing|not at door|not in mailbox|delivery guy|delivery boy|delivery partner|delivery person|courier|still not got|never arrived|haven't received|not delivered|waited for delivery|expected today but no delivery|tracking shows delivered but nothing|empty box received/i.test(msg);
-    
-    if (isMissingPackage) {
-      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', lastIssueType: 'delivery' }));
       
-      if (userMsg.split(' ').length > 8) {
-        const prefix = additionalNote;
-        return prefix + "That's completely unacceptable — I'm really sorry this happened 😔 You shouldn't have to deal with this. I'm on it right now.\n\nWhat would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
-      } else {
-        return "Oh no, that's so frustrating 😔 I'm sorry about this. Quick question — did the tracking update show delivered, or has there been no update at all?";
+      // If awaiting choice but no valid choice detected, prompt again
+      if (context.choiceContext === 'delivery') {
+        return "Please choose an option:\n1️⃣ Track order\n2️⃣ Replacement\n3️⃣ Refund\n\nJust type the number or option you prefer.";
+      }
+      if (context.choiceContext === 'damaged') {
+        return "Please choose an option:\n1️⃣ Return & replacement\n2️⃣ Return & refund\n3️⃣ Keep & partial refund\n\nJust type the number you prefer.";
       }
     }
     
-    // INTENT 7: RETURN REQUEST
-    if (/\breturn\b|send back|want to return|i want to return|return this|return my order|return request|initiate return|how to return/i.test(msg) && !isDamagedOrWrong) {
-      if (context.conversationState === 'greeting' || context.lastIssueType !== 'return') {
-        setContext(prev => ({ ...prev, conversationState: 'return_inquiry', lastIssueType: 'return' }));
-        return "I'll get that sorted for you right away 😊 What's the reason for the return?\n— Wrong size or color\n— Damaged or defective\n— Changed my mind\n— Something else";
-      } else if (context.conversationState === 'return_inquiry') {
-        setContext(prev => ({ ...prev, conversationState: 'return_confirm' }));
-        return "Got it, that makes sense. Is this the item you ordered recently?";
-      } else if (context.conversationState === 'return_confirm') {
-        setContext(prev => ({ ...prev, issueResolved: true }));
-        return "Done! Free pickup scheduled for tomorrow 10AM–2PM 📦 Your refund of ₹2,499 will be processed within 5 days of pickup. You'll get an SMS confirmation shortly ✅";
-      }
-    }
+    // ═══════════════════════════════════════════════════════════
+    // STEP 3: GLOBAL INTENT ENGINE (IF NOT AWAITING CHOICE)
+    // ═══════════════════════════════════════════════════════════
     
-    // INTENT 8: CANCELLATION
-    if (/cancel|don't want|cancel order|want to cancel|please cancel|stop my order|cancel this|cancel before delivery/i.test(msg)) {
-      if (context.conversationState === 'greeting' || context.lastIssueType !== 'cancel') {
-        setContext(prev => ({ ...prev, conversationState: 'cancel_inquiry', lastIssueType: 'cancel' }));
-        return "Sure, I can cancel that for you! Has the order shipped yet, do you know?";
-      } else if (context.conversationState === 'cancel_inquiry') {
-        if (/no|not|hasn't|nope|not yet/i.test(msg)) {
-          setContext(prev => ({ ...prev, issueResolved: true }));
-          return "Done! Your order has been cancelled ✅ Refund of ₹2,499 will be credited to your original payment method instantly. Is there anything else I can help with?";
-        } else {
-          setContext(prev => ({ ...prev, issueResolved: true }));
-          return "Since it's already shipped, best option is to refuse delivery when it arrives — it'll come back to us automatically and your full refund will be processed within 5 days 👍 Want me to make a note on your account?";
-        }
-      }
-    }
-    
-    // INTENT 9: TRACKING
-    if (/track|where is|when will|arrive|delivery status|order status|how long|shipment|dispatched|out for delivery|expected delivery|where's my order|track my package/i.test(msg)) {
-      if (context.conversationState === 'greeting' || context.lastIssueType !== 'track') {
-        setContext(prev => ({ ...prev, conversationState: 'track_inquiry', lastIssueType: 'track' }));
-        return "Sure! What did you order? I'll pull up the latest for you.";
-      } else if (context.conversationState === 'track_inquiry') {
-        setContext(prev => ({ ...prev, issueResolved: true }));
-        
-        // Check for delayed delivery
-        if (/late|delayed|overdue|was supposed|should have come|yesterday/i.test(msg)) {
-          return "Your order is running late — I can see it's overdue 😔 Since it's past the expected delivery date, I can set up a refund or replacement for you right now. You don't have to wait any longer. Want me to do that?";
-        }
-        
-        return "Your order is out for delivery today! 🚚\nLast scanned: Mumbai Central facility at 8:30 AM.\nEstimated arrival: by 7PM tonight.\nWant a notification when it's 30 minutes away?";
-      }
-    }
-    
-    // INTENT 10: ADDRESS CHANGE
-    if (/wrong address|change address|update address|different address|new address|incorrect address|change delivery address|update my address|wrong delivery address/i.test(msg)) {
-      if (context.conversationState === 'greeting' || context.lastIssueType !== 'address') {
-        setContext(prev => ({ ...prev, conversationState: 'address_inquiry', lastIssueType: 'address' }));
-        return "No worries, quick fix! What's the correct delivery address?";
-      } else if (context.conversationState === 'address_inquiry') {
-        setContext(prev => ({ ...prev, issueResolved: true }));
-        return "Updated! Your order will now be delivered to that address. All confirmed ✅";
-      }
-    }
-    
-    // INTENT 11: REFUND STATUS/OPTIONS
+    // Check for refund options state
     if (context.conversationState === 'refund_options') {
       if (/1|option 1|instant|wallet|amazon pay/i.test(msg)) {
         setContext(prev => ({ ...prev, issueResolved: true, refundOffered: true }));
@@ -323,7 +262,6 @@ export default function Index() {
       if (/2|option 2|bank|card|original/i.test(msg)) {
         setContext(prev => ({ ...prev, issueResolved: true, refundOffered: true }));
         
-        // Check fraud score
         if (context.fraudScore >= 61) {
           return "I want to make absolutely sure your refund goes through without any issues 😊 I'm connecting you to a specialist who handles these cases directly. They'll reach out within 2 hours. Ticket #" + Math.floor(10000 + Math.random() * 90000) + " raised ✅";
         }
@@ -333,8 +271,117 @@ export default function Index() {
       }
     }
     
+    // INTENT: GRATITUDE (when issue not yet resolved)
+    const isThankYou = /thank|thanks|thx|ty|great|awesome|perfect|brilliant|wonderful|amazing|helpful|sorted|all good/i.test(msg);
+    if (isThankYou) {
+      return "You're welcome! 😊 Just checking — did we fully sort out your issue? I want to make sure you're good to go.";
+    }
+    
+    // INTENT: GOODBYE
+    if (/bye|goodbye|see you|take care|cya|good night|good day|see ya|logging off|ttyl/i.test(msg)) {
+      return "Take care! 👋 Hope I made your day a little easier. Happy shopping on Amazon! 😊";
+    }
+    
+    // INTENT: ANGRY / EXTREMELY FRUSTRATED
+    const isAngry = msg === msg.toUpperCase() && msg.length > 5;
+    const hasFrustratedWords = /ridiculous|pathetic|worst|horrible|disgusting|unacceptable|fraud|cheating|useless|terrible|awful|never buying again|consumer forum|escalate|legal action|this is a scam/i.test(msg);
+    
+    if (isAngry || hasFrustratedWords) {
+      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', lastIssueType: 'delivery', activeIntent: 'delivery', issueExplained: true }));
+      const prefix = context.repeatIssue ? "I see this has happened before — that's completely unacceptable and I sincerely apologize 😔 You should never have to face this more than once.\n\n" : '';
+      return prefix + "That's completely unacceptable and I am so sorry this happened to you 😔 You did not deserve this. I'm treating this as urgent and will fix it right now.\n\nWhat would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
+    }
+    
+    // INTENT: DAMAGED / WRONG ITEM DELIVERED
+    const isDamagedOrWrong = /damaged|broken|wrong item|wrong product|cracked|scratched|torn|defective|faulty|not working|wrong\/damaged|wrong parcel|damaged parcel|received wrong|got wrong|different product|not what i ordered|fake|duplicate|open box|tampered|seal broken|used product/i.test(msg);
+    
+    if (isDamagedOrWrong) {
+      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'damaged', lastIssueType: 'damaged', riskFlag: true, activeIntent: 'damaged', issueExplained: true }));
+      const prefix = context.repeatIssue ? "I see this has happened before — that's completely unacceptable and I sincerely apologize 😔 You should never have to face this more than once.\n\n" : '';
+      return prefix + "Oh no, that's really upsetting 😔 I'm sorry you received a damaged or wrong item — that should never happen.\n\nWhat would you like me to do?\n\n1️⃣ Return & replacement — send it back, get a new one\n2️⃣ Return & refund — send it back, get your money back\n3️⃣ Keep it & partial refund — if the damage is minor";
+    }
+    
+    // INTENT: MISSING / UNDELIVERED PACKAGE
+    const isMissingPackage = /didn't receive|did not receive|not received|never got|shows delivered|marked delivered|app shows delivered|parcel not here|package missing|not at door|not in mailbox|delivery guy|delivery boy|delivery partner|delivery person|courier|still not got|never arrived|haven't received|not delivered|waited for delivery|expected today but no delivery|tracking shows delivered but nothing|empty box received/i.test(msg);
+    
+    if (isMissingPackage) {
+      setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', lastIssueType: 'delivery', activeIntent: 'delivery', issueExplained: true }));
+      
+      // If message is long (>20 chars) and detailed, skip clarification
+      if (msgLength > 20 || userMsg.split(' ').length > 8) {
+        const prefix = context.repeatIssue ? "I see this has happened before — that's completely unacceptable and I sincerely apologize 😔 You should never have to face this more than once.\n\n" : '';
+        return prefix + "That's completely unacceptable — I'm really sorry this happened 😔 You shouldn't have to deal with this. I'm on it right now.\n\nWhat would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
+      } else if (context.issueExplained) {
+        // Already explained once, don't ask again
+        return "That's completely unacceptable — I'm really sorry this happened 😔 You shouldn't have to deal with this. I'm on it right now.\n\nWhat would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
+      } else {
+        // First time, short message - ask one clarification
+        setContext(prev => ({ ...prev, issueExplained: true, awaitingChoice: false }));
+        return "Oh no, that's so frustrating 😔 I'm sorry about this. Quick question — did the tracking update show delivered, or has there been no update at all?";
+      }
+    }
+    
+    // INTENT: RETURN REQUEST
+    if (/\breturn\b|send back|want to return|i want to return|return this|return my order|return request|initiate return|how to return/i.test(msg) && !isDamagedOrWrong) {
+      if (!context.activeIntent || context.activeIntent !== 'return') {
+        setContext(prev => ({ ...prev, conversationState: 'return_inquiry', lastIssueType: 'return', activeIntent: 'return', issueExplained: true }));
+        return "I'll get that sorted for you right away 😊 What's the reason for the return?\n— Wrong size or color\n— Damaged or defective\n— Changed my mind\n— Something else";
+      } else if (context.conversationState === 'return_inquiry') {
+        setContext(prev => ({ ...prev, conversationState: 'return_confirm' }));
+        return "Got it, that makes sense. Is this the item you ordered recently?";
+      } else if (context.conversationState === 'return_confirm') {
+        setContext(prev => ({ ...prev, issueResolved: true }));
+        return "Done! Free pickup scheduled for tomorrow 10AM–2PM 📦 Your refund of ₹2,499 will be processed within 5 days of pickup. You'll get an SMS confirmation shortly ✅";
+      }
+    }
+    
+    // INTENT: CANCELLATION
+    if (/cancel|don't want|cancel order|want to cancel|please cancel|stop my order|cancel this|cancel before delivery/i.test(msg)) {
+      if (!context.activeIntent || context.activeIntent !== 'cancel') {
+        setContext(prev => ({ ...prev, conversationState: 'cancel_inquiry', lastIssueType: 'cancel', activeIntent: 'cancel', issueExplained: true }));
+        return "Sure, I can cancel that for you! Has the order shipped yet, do you know?";
+      } else if (context.conversationState === 'cancel_inquiry') {
+        if (/no|not|hasn't|nope|not yet/i.test(msg)) {
+          setContext(prev => ({ ...prev, issueResolved: true }));
+          return "Done! Your order has been cancelled ✅ Refund of ₹2,499 will be credited to your original payment method instantly. Is there anything else I can help with?";
+        } else {
+          setContext(prev => ({ ...prev, issueResolved: true }));
+          return "Since it's already shipped, best option is to refuse delivery when it arrives — it'll come back to us automatically and your full refund will be processed within 5 days 👍 Want me to make a note on your account?";
+        }
+      }
+    }
+    
+    // INTENT: TRACKING
+    if (/track|where is|when will|arrive|delivery status|order status|how long|shipment|dispatched|out for delivery|expected delivery|where's my order|track my package/i.test(msg)) {
+      if (!context.activeIntent || context.activeIntent !== 'track') {
+        setContext(prev => ({ ...prev, conversationState: 'track_inquiry', lastIssueType: 'track', activeIntent: 'track', issueExplained: true }));
+        return "Sure! What did you order? I'll pull up the latest for you.";
+      } else if (context.conversationState === 'track_inquiry') {
+        setContext(prev => ({ ...prev, issueResolved: true }));
+        
+        // Check for delayed delivery
+        if (/late|delayed|overdue|was supposed|should have come|yesterday/i.test(msg)) {
+          return "Your order is running late — I can see it's overdue 😔 Since it's past the expected delivery date, I can set up a refund or replacement for you right now. You don't have to wait any longer. Want me to do that?";
+        }
+        
+        return "Your order is out for delivery today! 🚚\nLast scanned: Mumbai Central facility at 8:30 AM.\nEstimated arrival: by 7PM tonight.\nWant a notification when it's 30 minutes away?";
+      }
+    }
+    
+    // INTENT: ADDRESS CHANGE
+    if (/wrong address|change address|update address|different address|new address|incorrect address|change delivery address|update my address|wrong delivery address/i.test(msg)) {
+      if (!context.activeIntent || context.activeIntent !== 'address') {
+        setContext(prev => ({ ...prev, conversationState: 'address_inquiry', lastIssueType: 'address', activeIntent: 'address', issueExplained: true }));
+        return "No worries, quick fix! What's the correct delivery address?";
+      } else if (context.conversationState === 'address_inquiry') {
+        setContext(prev => ({ ...prev, issueResolved: true }));
+        return "Updated! Your order will now be delivered to that address. All confirmed ✅";
+      }
+    }
+    
+    // INTENT: REFUND STATUS (separate from refund options state)
     if (/refund|money back|want refund|refund status|where is my refund|not received refund|when will i get refund|refund not credited/i.test(msg) && context.conversationState !== 'refund_options') {
-      setContext(prev => ({ ...prev, conversationState: 'refund_inquiry', refundAttempts: prev.refundAttempts + 1 }));
+      setContext(prev => ({ ...prev, conversationState: 'refund_inquiry', refundAttempts: prev.refundAttempts + 1, activeIntent: 'refund', issueExplained: true }));
       return "I'll check on that right away. Was the refund for a recent return or a missing order?";
     }
     
@@ -343,7 +390,19 @@ export default function Index() {
       return "I can process this in two ways:\n\n⚡ Option 1 — Instant to Amazon Pay wallet\n   Available in 2 minutes after pickup confirmation.\n\n🏦 Option 2 — Back to original payment method\n   3–5 business days to your card or bank account.\n\nWhich do you prefer?";
     }
     
-    // INTENT 12: SMALL TALK
+    // INTENT: GLOBAL RESCHEDULE (before fallback)
+    const isReschedule = /reschedule|schedule again|change date|change delivery date|deliver tomorrow|missed delivery|attempt failed|deliver later|different time|another day/i.test(msg);
+    if (isReschedule) {
+      if (context.activeIntent === 'delivery' || context.lastIssueType === 'delivery') {
+        setContext(prev => ({ ...prev, issueResolved: true }));
+        return "No problem 👍 I've rescheduled your delivery for tomorrow between 10AM–2PM. You'll receive a confirmation SMS shortly.";
+      } else {
+        setContext(prev => ({ ...prev, activeIntent: 'reschedule', issueExplained: true }));
+        return "Is this about a current order that's out for delivery?";
+      }
+    }
+    
+    // INTENT: SMALL TALK
     if (/^(hi|hello|hey|what's up)$/i.test(msg.trim())) {
       return "Hey! 👋 I'm Aza, Amazon's assistant. Just tell me what's going on and I'll sort it out right now 😊";
     }
@@ -356,8 +415,23 @@ export default function Index() {
       return "I'm Aza, Amazon's AI support assistant! 🤖\nI can help with:\n— Missing or undelivered orders\n— Returns and replacements\n— Refunds (instant or standard)\n— Order tracking\n— Cancellations and address changes\nNo hold times. No waiting. Just talk to me 😊";
     }
     
-    // INTENT 13: FALLBACK
-    return "I want to make sure I get this right for you 😊 Could you tell me a little more about what's going on with your order?";
+    // ═══════════════════════════════════════════════════════════
+    // STEP 4: STRICT FALLBACK - ONLY IF NOTHING MATCHED
+    // ═══════════════════════════════════════════════════════════
+    
+    // Fallback FORBIDDEN if issue already explained
+    if (context.issueExplained) {
+      // Don't ask "what happened" again - offer help
+      return "I want to help you with this. Could you choose what you'd like me to do:\n— Process a refund\n— Send a replacement\n— Track your order\n— Something else?";
+    }
+    
+    // Fallback only fires if absolutely nothing matched and issue not yet explained
+    if (!context.awaitingChoice && !context.issueExplained && !context.activeIntent) {
+      return "I want to make sure I get this right for you 😊 Could you tell me a little more about what's going on with your order?";
+    }
+    
+    // Safety fallback (should rarely trigger)
+    return "I'm here to help! What can I do for you today?";
   }
 
   async function handleSend() {
