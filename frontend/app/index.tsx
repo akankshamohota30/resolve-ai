@@ -66,6 +66,7 @@ export default function Index() {
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [sessionClosed, setSessionClosed] = useState(false);
   const [context, setContext] = useState<ConversationContext>({
     conversationState: 'greeting',
     lastIssueType: 'none',
@@ -199,6 +200,22 @@ export default function Index() {
     }
     
     // ═══════════════════════════════════════════════════════════
+    // SESSION CLOSURE HANDLING - Reset context for new request
+    // ═══════════════════════════════════════════════════════════
+    if (sessionClosed) {
+      // Reset issue-specific states but keep chat history
+      setContext(prev => ({
+        ...prev,
+        awaitingChoice: false,
+        issueResolved: false,
+        activeIntent: null,
+        issueExplained: false,
+        conversationState: 'greeting',
+      }));
+      setSessionClosed(false);
+    }
+    
+    // ═══════════════════════════════════════════════════════════
     // STEP 1: IF ISSUE RESOLVED - ONLY ALLOW GRATITUDE/GOODBYE
     // ═══════════════════════════════════════════════════════════
     if (context.issueResolved) {
@@ -220,8 +237,40 @@ export default function Index() {
         return "Take care! 👋 Hope I made your day a little easier. Happy shopping on Amazon! 😊";
       }
       
-      // If they ask something else after resolution, acknowledge but keep resolved
-      return "Is there anything else I can help you with today? 😊";
+      // If they ask something else after resolution, reset and treat as new request
+      setSessionClosed(true);
+      setContext(prev => ({
+        ...prev,
+        awaitingChoice: false,
+        issueResolved: false,
+        activeIntent: null,
+        issueExplained: false,
+        conversationState: 'greeting',
+      }));
+      
+      // Fall through to handle as new request
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // GUARD: Refund/Replace/Cancel with NO activeIntent
+    // ═══════════════════════════════════════════════════════════
+    if (!context.activeIntent && /^(refund|replace|cancel)$/i.test(msg.trim())) {
+      setContext(prev => ({ ...prev, conversationState: 'context_inquiry', issueExplained: true }));
+      return "Sure, I can help with that. Is this regarding a recent order that was delivered, damaged, or not received?";
+    }
+    
+    // If in context_inquiry state, route based on answer
+    if (context.conversationState === 'context_inquiry') {
+      if (/delivered|shows delivered|marked delivered/i.test(msg)) {
+        setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', activeIntent: 'delivery', conversationState: 'greeting' }));
+        return "That's frustrating 😔 I'm sorry about this. What would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
+      } else if (/damaged|wrong|broken|defective/i.test(msg)) {
+        setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'damaged', activeIntent: 'damaged', conversationState: 'greeting' }));
+        return "I'm sorry you received a damaged or wrong item. What would you like me to do?\n\n1️⃣ Return & replacement — send it back, get a new one\n2️⃣ Return & refund — send it back, get your money back\n3️⃣ Keep it & partial refund — if the damage is minor";
+      } else if (/not received|never got|didn't get/i.test(msg)) {
+        setContext(prev => ({ ...prev, awaitingChoice: true, choiceContext: 'delivery', activeIntent: 'delivery', conversationState: 'greeting' }));
+        return "That's completely unacceptable 😔 What would you like me to do?\n\n1️⃣ Track my order — find exact current location\n2️⃣ Send a replacement — get a new one delivered\n3️⃣ Process a refund — get my money back";
+      }
     }
     
     // ═══════════════════════════════════════════════════════════
