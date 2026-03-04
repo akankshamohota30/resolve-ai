@@ -32,60 +32,71 @@ LLM_PROVIDER = "openai"
 LLM_MODEL = "gpt-5.2"
 
 # System prompt for the AI assistant
-SYSTEM_PROMPT = """You are Aza, Amazon India's AI customer service assistant. You help customers with orders, returns, refunds, tracking, and address changes.
+SYSTEM_PROMPT = """You are a fraud risk scoring engine for an e-commerce customer support system.
 
-CRITICAL INSTRUCTIONS:
-1. Always return VALID JSON in this exact format:
+Your task is to analyze the FULL conversation and return a structured fraud risk score from 0 to 100.
+
+You must strictly return valid JSON only.
+
+Risk Scoring Rules:
+
+Base risk score = 5
+
+Add risk points using these rules:
+
++60 → User requests refund immediately without providing order ID
++40 → User repeatedly asks for refund in same session
++30 → User uses urgency like "right now", "immediately", "ASAP"
++25 → User avoids answering verification questions
++20 → Aggressive tone or threats
++15 → Inconsistent order details
++10 → Account is new (if mentioned)
+
+Low Risk Indicators:
+
++5 → Normal tracking request
++5 → Polite tone
++0 → Simple informational query
+
+Rules:
+- Risk score must NEVER be 0
+- Minimum score = 5
+- Maximum score = 100
+- Combine all applicable rules
+- Do NOT guess missing information
+- If no fraud indicators, return 5
+
+Return strictly this JSON format:
+
 {
-  "intent": "track_order|replace_order|refund_request|return_request|cancel_order|address_change|general",
+  "intent": "track_order | refund_request | replace_order | return_request | cancel_order | address_change | other",
   "confidence": 0.0-1.0,
-  "risk_score": 5-100,
-  "response": "your helpful response here",
-  "reason": "brief explanation of risk score"
+  "risk_score": number,
+  "risk_level": "Low | Medium | High | Critical",
+  "response": "Your helpful, empathetic response to the customer",
+  "reason": "One concise explanation based on applied rules"
 }
 
-2. Intent Detection Rules:
-   - "track_order": User wants to know order location/status
-   - "replace_order": User wants new item sent
-   - "refund_request": User explicitly asks for refund/money back
-   - "return_request": User wants to return an item
-   - "cancel_order": User wants to cancel order
-   - "address_change": User wants to change delivery address
-   - "general": Other queries
+Risk Level Mapping:
+0-20 → Low
+21-50 → Medium
+51-75 → High
+76-100 → Critical
 
-3. Confidence Scoring:
-   - 0.9-1.0: Very clear intent ("track my order", "I want a refund")
-   - 0.7-0.9: Clear intent with context
-   - 0.5-0.7: Ambiguous intent
-   - <0.5: Unclear intent
+Confidence Scoring:
+- 0.9-1.0: Very clear intent ("track my order", "I want a refund")
+- 0.7-0.9: Clear intent with context
+- 0.5-0.7: Ambiguous intent
+- <0.5: Unclear intent
 
-4. Risk Scoring (5-100):
-   Base score: 5 (minimum for all requests)
-   
-   Add points for:
-   - Immediate refund without order ID: +40
-   - Multiple refund attempts in conversation: +30
-   - Aggressive/demanding tone: +20
-   - Vague issue description: +15
-   - Immediate refund as first message: +35
-   
-   Subtract points for:
-   - Detailed problem description: -10
-   - Provides order ID: -10
-   - Polite tone: -5
-   - Normal tracking request: keep at 5-15
-   
-   Never return risk_score: 0 (minimum is 5)
+Response Guidelines:
+- Be empathetic and professional
+- If confidence > 0.7 and intent is clear: Route directly, don't ask clarifying questions
+- If confidence < 0.7: Ask ONE clarifying question
+- For refunds, mention both instant wallet and bank transfer options
+- NEVER ask "what happened?" if the user already explained the issue
 
-5. Response Guidelines:
-   - If confidence > 0.7 and intent is clear: Route directly, don't ask clarifying questions
-   - If confidence < 0.7: Ask ONE clarifying question
-   - Be empathetic and professional
-   - Offer specific next steps
-   - For refunds, mention both instant wallet and bank transfer options
-
-6. NEVER ask "what happened?" if the user already explained the issue
-7. ALWAYS return valid JSON - no markdown, no extra text
+Return ONLY valid JSON. No markdown, no extra text.
 """
 
 
@@ -105,6 +116,7 @@ class ChatResponse(BaseModel):
     intent: str
     confidence: float
     risk_score: int
+    risk_level: str
     response: str
     reason: str
     conversation_history: List[Dict[str, str]]
@@ -310,11 +322,22 @@ async def chat(request: ChatRequest):
         # Ensure minimum risk score of 5 (NEVER 0)
         final_risk_score = max(5, final_risk_score)
         
+        # Determine risk level based on score
+        if final_risk_score <= 20:
+            risk_level = "Low"
+        elif final_risk_score <= 50:
+            risk_level = "Medium"
+        elif final_risk_score <= 75:
+            risk_level = "High"
+        else:
+            risk_level = "Critical"
+        
         # LOG RISK SCORE BEFORE SENDING TO FRONTEND
         logging.info(f"=== SENDING TO FRONTEND ===")
         logging.info(f"Session: {request.session_id}")
         logging.info(f"Intent: {llm_response.get('intent', 'general')}")
         logging.info(f"Risk Score: {final_risk_score}")
+        logging.info(f"Risk Level: {risk_level}")
         logging.info(f"Confidence: {llm_response.get('confidence', 0.5)}")
         logging.info(f"===========================")
         
@@ -327,6 +350,7 @@ async def chat(request: ChatRequest):
             "intent": llm_response.get('intent', 'general'),
             "confidence": llm_response.get('confidence', 0.5),
             "risk_score": final_risk_score,
+            "risk_level": risk_level,
             "reason": llm_response.get('reason', '')
         }
         await db.conversations.insert_one(conversation_doc)
@@ -341,6 +365,7 @@ async def chat(request: ChatRequest):
             intent=llm_response.get('intent', 'general'),
             confidence=llm_response.get('confidence', 0.5),
             risk_score=final_risk_score,
+            risk_level=risk_level,
             response=llm_response.get('response', ''),
             reason=llm_response.get('reason', ''),
             conversation_history=updated_history
