@@ -114,10 +114,16 @@ class ChatResponse(BaseModel):
 async def calculate_risk_score(conversation_history: List[Dict[str, str]], current_intent: str) -> int:
     """
     Calculate dynamic risk score based on conversation history
-    Minimum score: 5
+    NEVER RETURNS 0 - Minimum score: 5 for tracking, 10 for all others
     Maximum score: 100
     """
-    risk_score = 5  # Base minimum score
+    # Deterministic baseline based on intent
+    if current_intent == 'track_order':
+        risk_score = 5  # Normal tracking is low risk
+    elif current_intent == 'refund_request':
+        risk_score = 30  # Refund requests start higher
+    else:
+        risk_score = 10  # Default baseline for other intents
     
     # Count refund requests in conversation
     refund_count = sum(1 for msg in conversation_history 
@@ -125,19 +131,35 @@ async def calculate_risk_score(conversation_history: List[Dict[str, str]], curre
                       any(word in msg.get('content', '').lower() 
                           for word in ['refund', 'money back']))
     
-    # Check if first message is refund request
-    if len(conversation_history) <= 2 and current_intent == 'refund_request':
-        user_messages = [msg for msg in conversation_history if msg.get('role') == 'user']
-        if len(user_messages) == 1:
-            first_msg = user_messages[0].get('content', '').lower()
-            if 'refund' in first_msg and len(first_msg.split()) < 10:
-                risk_score += 40  # Immediate refund without context
+    # Get user messages only
+    user_messages = [msg for msg in conversation_history if msg.get('role') == 'user']
     
-    # Multiple refund attempts
+    # RULE 1: Refund without order ID = 60+
+    if current_intent == 'refund_request' and len(user_messages) <= 2:
+        # Check if order ID mentioned
+        has_order_id = False
+        for msg in user_messages:
+            content = msg.get('content', '')
+            if 'order' in content.lower() and any(char.isdigit() for char in content):
+                has_order_id = True
+                break
+        
+        if not has_order_id:
+            risk_score = 60  # Refund without order ID
+            logging.info(f"Risk: Refund without order ID detected. Score: {risk_score}")
+    
+    # RULE 2: Multiple refunds in session = +20 each
     if refund_count >= 3:
-        risk_score += 30
+        risk_score += 60  # 3+ refund attempts
+        logging.info(f"Risk: Multiple refund attempts ({refund_count}). Added +60. Score: {risk_score}")
     elif refund_count == 2:
-        risk_score += 15
+        risk_score += 20  # 2 refund attempts
+        logging.info(f"Risk: Second refund attempt. Added +20. Score: {risk_score}")
+    
+    # RULE 3: Normal tracking stays 5-10
+    if current_intent == 'track_order':
+        # Keep tracking between 5-10
+        risk_score = min(risk_score, 10)
     
     # Check for aggressive tone in recent messages
     recent_messages = conversation_history[-3:] if len(conversation_history) > 3 else conversation_history
@@ -147,32 +169,29 @@ async def calculate_risk_score(conversation_history: List[Dict[str, str]], curre
             content_lower = msg.get('content', '').lower()
             if any(word in content_lower for word in aggressive_words):
                 risk_score += 20
+                logging.info(f"Risk: Aggressive tone detected. Added +20. Score: {risk_score}")
                 break
     
-    # Check for detailed description (reduces risk)
-    user_messages = [msg for msg in conversation_history if msg.get('role') == 'user']
+    # Check for detailed description (reduces risk but never below baseline)
     if user_messages:
         last_msg = user_messages[-1].get('content', '')
         if len(last_msg.split()) > 20:
-            risk_score = max(5, risk_score - 10)  # Detailed description
+            original_score = risk_score
+            risk_score = max(10, risk_score - 10)  # Detailed description, min 10
+            logging.info(f"Risk: Detailed description. Reduced from {original_score} to {risk_score}")
     
-    # Check for order ID mention (reduces risk)
-    if any('order' in msg.get('content', '').lower() and 
-           any(char.isdigit() for char in msg.get('content', ''))
-           for msg in user_messages):
-        risk_score = max(5, risk_score - 10)
+    # Ensure within bounds (NEVER 0)
+    final_score = max(5, min(100, risk_score))
     
-    # Normal tracking requests should be low risk
-    if current_intent == 'track_order' and risk_score < 20:
-        risk_score = min(risk_score, 15)
+    logging.info(f"FINAL RISK SCORE: {final_score} (Intent: {current_intent}, Refund Count: {refund_count})")
     
-    # Ensure within bounds
-    return max(5, min(100, risk_score))
+    return final_score
 
 
 async def call_llm_with_retry(chat: LlmChat, user_message: UserMessage, max_retries: int = 2) -> Dict[str, Any]:
     """
     Call LLM and retry once if JSON parsing fails
+    NEVER returns risk_score: 0 - minimum is 10 on failure
     """
     for attempt in range(max_retries):
         try:
@@ -194,6 +213,10 @@ async def call_llm_with_retry(chat: LlmChat, user_message: UserMessage, max_retr
             # Validate required fields
             required_fields = ['intent', 'confidence', 'risk_score', 'response', 'reason']
             if all(field in response_json for field in required_fields):
+                # Ensure risk_score is never 0
+                if response_json.get('risk_score', 0) == 0:
+                    response_json['risk_score'] = 10
+                    logging.warning("LLM returned risk_score: 0, overriding to 10")
                 return response_json
             else:
                 if attempt < max_retries - 1:
@@ -202,30 +225,33 @@ async def call_llm_with_retry(chat: LlmChat, user_message: UserMessage, max_retr
                     raise ValueError("Missing required fields in response")
                     
         except json.JSONDecodeError as e:
+            logging.error(f"JSON parsing failed (attempt {attempt + 1}): {e}")
             if attempt < max_retries - 1:
                 # Retry with explicit JSON request
                 retry_message = UserMessage(
-                    text="Please respond with ONLY valid JSON. No other text. Format: {\"intent\": \"...\", \"confidence\": 0.0, \"risk_score\": 0, \"response\": \"...\", \"reason\": \"...\"}"
+                    text="Please respond with ONLY valid JSON. No other text. Format: {\"intent\": \"...\", \"confidence\": 0.0, \"risk_score\": 10, \"response\": \"...\", \"reason\": \"...\"}"
                 )
                 response_text = await chat.send_message(retry_message)
                 continue
             else:
-                # Fallback response
+                # Fallback response with risk_score = 10 (NEVER 0)
+                logging.error("All retry attempts failed, using fallback with risk_score: 10")
                 return {
                     "intent": "general",
                     "confidence": 0.5,
-                    "risk_score": 20,
+                    "risk_score": 10,  # Minimum baseline on failure
                     "response": "I want to help you with that. Could you provide more details about your order issue?",
-                    "reason": "Could not parse LLM response"
+                    "reason": "LLM response parsing failed - using fallback"
                 }
     
-    # If all retries fail, return fallback
+    # If all retries fail, return fallback with risk_score = 10
+    logging.error("Maximum retries exceeded, using fallback with risk_score: 10")
     return {
         "intent": "general",
         "confidence": 0.3,
-        "risk_score": 25,
+        "risk_score": 10,  # NEVER 0 - minimum baseline
         "response": "I'm here to help. Please tell me more about what you need assistance with.",
-        "reason": "LLM response parsing failed after retries"
+        "reason": "LLM response parsing failed after all retries"
     }
 
 
@@ -279,10 +305,18 @@ async def chat(request: ChatRequest):
         )
         
         # Override LLM risk score with our calculated one (more reliable)
-        final_risk_score = max(calculated_risk_score, llm_response.get('risk_score', 5))
+        final_risk_score = max(calculated_risk_score, llm_response.get('risk_score', 10))
         
-        # Ensure minimum risk score of 5
+        # Ensure minimum risk score of 5 (NEVER 0)
         final_risk_score = max(5, final_risk_score)
+        
+        # LOG RISK SCORE BEFORE SENDING TO FRONTEND
+        logging.info(f"=== SENDING TO FRONTEND ===")
+        logging.info(f"Session: {request.session_id}")
+        logging.info(f"Intent: {llm_response.get('intent', 'general')}")
+        logging.info(f"Risk Score: {final_risk_score}")
+        logging.info(f"Confidence: {llm_response.get('confidence', 0.5)}")
+        logging.info(f"===========================")
         
         # Store message in MongoDB
         conversation_doc = {
