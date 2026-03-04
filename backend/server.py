@@ -126,73 +126,118 @@ class ChatResponse(BaseModel):
 async def calculate_risk_score(conversation_history: List[Dict[str, str]], current_intent: str) -> int:
     """
     Calculate dynamic risk score based on conversation history
-    NEVER RETURNS 0 - Minimum score: 5 for tracking, 10 for all others
-    Maximum score: 100
+    NEVER RETURNS 0 - Base score: 5
+    Uses exact fraud detection rules
     """
-    # Deterministic baseline based on intent
-    if current_intent == 'track_order':
-        risk_score = 5  # Normal tracking is low risk
-    elif current_intent == 'refund_request':
-        risk_score = 30  # Refund requests start higher
-    else:
-        risk_score = 10  # Default baseline for other intents
-    
-    # Count refund requests in conversation
-    refund_count = sum(1 for msg in conversation_history 
-                      if msg.get('role') == 'user' and 
-                      any(word in msg.get('content', '').lower() 
-                          for word in ['refund', 'money back']))
+    # Base risk score
+    risk_score = 5
     
     # Get user messages only
     user_messages = [msg for msg in conversation_history if msg.get('role') == 'user']
     
-    # RULE 1: Refund without order ID = 60+
-    if current_intent == 'refund_request' and len(user_messages) <= 2:
-        # Check if order ID mentioned
+    if not user_messages:
+        return risk_score
+    
+    latest_msg = user_messages[-1].get('content', '').lower()
+    
+    # Count refund requests in conversation
+    refund_count = sum(1 for msg in user_messages 
+                      if any(word in msg.get('content', '').lower() 
+                            for word in ['refund', 'money back']))
+    
+    # RULE 1: +60 → User requests refund immediately without providing order ID
+    if current_intent == 'refund_request':
         has_order_id = False
         for msg in user_messages:
             content = msg.get('content', '')
+            # Check for order ID patterns
+            if any(pattern in content.lower() for pattern in ['order #', 'order id', 'order number']):
+                has_order_id = True
+                break
+            # Check for numeric patterns that might be order IDs
             if 'order' in content.lower() and any(char.isdigit() for char in content):
                 has_order_id = True
                 break
         
         if not has_order_id:
-            risk_score = 60  # Refund without order ID
-            logging.info(f"Risk: Refund without order ID detected. Score: {risk_score}")
+            risk_score += 60
+            logging.info(f"Risk: Refund without order ID (+60). Score: {risk_score}")
     
-    # RULE 2: Multiple refunds in session = +20 each
-    if refund_count >= 3:
-        risk_score += 60  # 3+ refund attempts
-        logging.info(f"Risk: Multiple refund attempts ({refund_count}). Added +60. Score: {risk_score}")
-    elif refund_count == 2:
-        risk_score += 20  # 2 refund attempts
-        logging.info(f"Risk: Second refund attempt. Added +20. Score: {risk_score}")
+    # RULE 2: +40 → User repeatedly asks for refund in same session
+    if refund_count >= 2:
+        risk_score += 40
+        logging.info(f"Risk: Repeated refund requests ({refund_count}) (+40). Score: {risk_score}")
     
-    # RULE 3: Normal tracking stays 5-10
-    if current_intent == 'track_order':
-        # Keep tracking between 5-10
-        risk_score = min(risk_score, 10)
+    # RULE 3: +30 → User uses urgency like "right now", "immediately", "ASAP"
+    urgency_words = ['right now', 'immediately', 'asap', 'urgent', 'quickly', 'fast', 'hurry']
+    if any(word in latest_msg for word in urgency_words):
+        risk_score += 30
+        logging.info(f"Risk: Urgency language detected (+30). Score: {risk_score}")
     
-    # Check for aggressive tone in recent messages
-    recent_messages = conversation_history[-3:] if len(conversation_history) > 3 else conversation_history
-    aggressive_words = ['give me', 'just refund', 'immediately', 'now', 'ridiculous', 'pathetic', 'worst']
-    for msg in recent_messages:
-        if msg.get('role') == 'user':
-            content_lower = msg.get('content', '').lower()
-            if any(word in content_lower for word in aggressive_words):
-                risk_score += 20
-                logging.info(f"Risk: Aggressive tone detected. Added +20. Score: {risk_score}")
+    # RULE 4: +25 → User avoids answering verification questions
+    # Check if bot asked a question in previous message and user didn't answer
+    if len(conversation_history) >= 2:
+        last_bot_msg = None
+        for i in range(len(conversation_history) - 1, -1, -1):
+            if conversation_history[i].get('role') == 'assistant':
+                last_bot_msg = conversation_history[i].get('content', '')
                 break
+        
+        if last_bot_msg and '?' in last_bot_msg:
+            # Bot asked a question
+            avoidance_phrases = ['just refund', 'just give', 'i dont care', "don't need", 'forget it']
+            if any(phrase in latest_msg for phrase in avoidance_phrases):
+                risk_score += 25
+                logging.info(f"Risk: Avoiding verification questions (+25). Score: {risk_score}")
     
-    # Check for detailed description (reduces risk but never below baseline)
-    if user_messages:
-        last_msg = user_messages[-1].get('content', '')
-        if len(last_msg.split()) > 20:
-            original_score = risk_score
-            risk_score = max(10, risk_score - 10)  # Detailed description, min 10
-            logging.info(f"Risk: Detailed description. Reduced from {original_score} to {risk_score}")
+    # RULE 5: +20 → Aggressive tone or threats
+    aggressive_words = ['ridiculous', 'pathetic', 'worst', 'terrible', 'horrible', 'lawsuit', 
+                       'legal action', 'lawyer', 'sue', 'complaint', 'consumer forum', 'scam']
+    if any(word in latest_msg for word in aggressive_words) or latest_msg.isupper():
+        risk_score += 20
+        logging.info(f"Risk: Aggressive tone/threats (+20). Score: {risk_score}")
     
-    # Ensure within bounds (NEVER 0)
+    # RULE 6: +15 → Inconsistent order details
+    # Check if user provides different details about the same order
+    if len(user_messages) >= 2:
+        # Simple check: if they mention different products or amounts
+        product_mentions = []
+        for msg in user_messages:
+            content = msg.get('content', '').lower()
+            if 'headphone' in content:
+                product_mentions.append('headphone')
+            if 'phone' in content and 'headphone' not in content:
+                product_mentions.append('phone')
+            if 'shoe' in content:
+                product_mentions.append('shoe')
+        
+        if len(set(product_mentions)) > 1:
+            risk_score += 15
+            logging.info(f"Risk: Inconsistent order details (+15). Score: {risk_score}")
+    
+    # RULE 7: +10 → Account is new (if mentioned)
+    if 'new account' in latest_msg or 'just created' in latest_msg or 'first order' in latest_msg:
+        risk_score += 10
+        logging.info(f"Risk: New account mentioned (+10). Score: {risk_score}")
+    
+    # LOW RISK INDICATORS
+    
+    # +5 → Normal tracking request
+    if current_intent == 'track_order' and refund_count == 0:
+        risk_score += 5
+        logging.info(f"Low risk: Normal tracking request (+5). Score: {risk_score}")
+    
+    # +5 → Polite tone
+    polite_words = ['please', 'thank you', 'thanks', 'appreciate', 'kindly', 'could you']
+    if any(word in latest_msg for word in polite_words):
+        risk_score += 5
+        logging.info(f"Low risk: Polite tone (+5). Score: {risk_score}")
+    
+    # +0 → Simple informational query (already at base 5)
+    if current_intent in ['other', 'general'] and len(latest_msg.split()) < 10:
+        logging.info(f"Low risk: Simple informational query. Score: {risk_score}")
+    
+    # Ensure within bounds (NEVER 0, minimum 5)
     final_score = max(5, min(100, risk_score))
     
     logging.info(f"FINAL RISK SCORE: {final_score} (Intent: {current_intent}, Refund Count: {refund_count})")
