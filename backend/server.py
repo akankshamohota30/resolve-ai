@@ -355,17 +355,16 @@ async def chat(request: ChatRequest):
         # Call LLM with retry logic
         llm_response = await call_llm_with_retry(chat, user_message)
         
-        # Calculate risk score dynamically
-        calculated_risk_score = await calculate_risk_score(
-            request.conversation_history,
-            llm_response.get('intent', 'general')
-        )
+        # Use LLM's risk score directly
+        risk_score_from_llm = llm_response.get('risk_score', 10)
         
-        # Override LLM risk score with our calculated one (more reliable)
-        final_risk_score = max(calculated_risk_score, llm_response.get('risk_score', 10))
+        # Ensure minimum risk score of 5 (NEVER 0) and cap at 100
+        final_risk_score = max(5, min(100, risk_score_from_llm))
         
-        # Ensure minimum risk score of 5 (NEVER 0)
-        final_risk_score = max(5, final_risk_score)
+        # If LLM returned 0, override to minimum
+        if risk_score_from_llm == 0:
+            final_risk_score = 10
+            logging.warning("LLM returned risk_score: 0, overriding to 10")
         
         # Determine risk level based on score
         if final_risk_score <= 20:
@@ -381,7 +380,8 @@ async def chat(request: ChatRequest):
         logging.info(f"=== SENDING TO FRONTEND ===")
         logging.info(f"Session: {request.session_id}")
         logging.info(f"Intent: {llm_response.get('intent', 'general')}")
-        logging.info(f"Risk Score: {final_risk_score}")
+        logging.info(f"Risk Score (from LLM): {risk_score_from_llm}")
+        logging.info(f"Final Risk Score: {final_risk_score}")
         logging.info(f"Risk Level: {risk_level}")
         logging.info(f"Confidence: {llm_response.get('confidence', 0.5)}")
         logging.info(f"===========================")
