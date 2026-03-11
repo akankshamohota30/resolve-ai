@@ -48,5 +48,5 @@ no human agents needed.
 
 ## Built by
 **Akanksha Mohota** — AI Product Manager  
-[LinkedIn](your-linkedin-url) | 
+[LinkedIn] https://www.linkedin.com/in/akanksha-mohota/ | 
 [Research Publication](https://www.ijfmr.com/research-paper.php?id=59121)
